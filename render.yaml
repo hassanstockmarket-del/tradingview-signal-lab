@@ -1,0 +1,7 @@
+services:
+  - type: web
+    name: tradingview-signal-lab
+    runtime: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    healthCheckPath: /health
