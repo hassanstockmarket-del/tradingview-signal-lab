@@ -77,7 +77,8 @@ def signals():
             FROM signals ORDER BY id DESC LIMIT %s
         """, (limit,)).fetchall()
     return jsonify(rows)
-
+if os.environ.get("DATABASE_URL"):
+    init_db()
 if __name__ == "__main__":
     init_db()
     port = int(os.environ.get("PORT", 10000))
