@@ -30,6 +30,7 @@ def alpaca_headers():
 def init_db():
     with get_conn() as conn:
 
+        # 1 HOUR
         conn.execute("""
             ALTER TABLE signals
             ADD COLUMN IF NOT EXISTS hour1_price DOUBLE PRECISION
@@ -45,6 +46,7 @@ def init_db():
             ADD COLUMN IF NOT EXISTS hour1_checked_at TIMESTAMPTZ
         """)
 
+        # END OF DAY
         conn.execute("""
             ALTER TABLE signals
             ADD COLUMN IF NOT EXISTS eod_price DOUBLE PRECISION
@@ -60,9 +62,28 @@ def init_db():
             ADD COLUMN IF NOT EXISTS eod_checked_at TIMESTAMPTZ
         """)
 
+        # DAY 2
+        conn.execute("""
+            ALTER TABLE signals
+            ADD COLUMN IF NOT EXISTS day2_price DOUBLE PRECISION
+        """)
+
+        conn.execute("""
+            ALTER TABLE signals
+            ADD COLUMN IF NOT EXISTS day2_return DOUBLE PRECISION
+        """)
+
+        conn.execute("""
+            ALTER TABLE signals
+            ADD COLUMN IF NOT EXISTS day2_checked_at TIMESTAMPTZ
+        """)
+
 
 def calculate_return(signal_price, future_price, direction):
-    if not signal_price or signal_price <= 0:
+    if signal_price is None or signal_price <= 0:
+        return None
+
+    if future_price is None:
         return None
 
     result = (
@@ -70,22 +91,22 @@ def calculate_return(signal_price, future_price, direction):
         / signal_price
     ) * 100
 
-    if direction == "SHORT":
+    if str(direction).upper() == "SHORT":
         result *= -1
 
     return round(result, 4)
 
 
-def get_minute_bars(ticker, start_time, end_time):
+def get_bars(ticker, timeframe, start_time, end_time, limit):
     url = f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars"
 
     params = {
-        "timeframe": "1Min",
+        "timeframe": timeframe,
         "start": start_time.isoformat(),
         "end": end_time.isoformat(),
         "adjustment": "raw",
         "feed": "iex",
-        "limit": 10000
+        "limit": limit
     }
 
     response = requests.get(
@@ -95,33 +116,39 @@ def get_minute_bars(ticker, start_time, end_time):
         timeout=30
     )
 
+    # Some old signals are not US stocks supported by
+    # Alpaca's stock-bars endpoint.
+    if response.status_code == 400:
+        print(f"SKIP | {ticker} | Alpaca does not accept this symbol")
+        return []
+
     response.raise_for_status()
 
-    return response.json().get("bars", [])
+    data = response.json()
+
+    # Alpaca can return "bars": null.
+    # Always return a list to the evaluator.
+    return data.get("bars") or []
+
+
+def get_minute_bars(ticker, start_time, end_time):
+    return get_bars(
+        ticker,
+        "1Min",
+        start_time,
+        end_time,
+        10000
+    )
 
 
 def get_daily_bars(ticker, start_time, end_time):
-    url = f"{ALPACA_DATA_URL}/v2/stocks/{ticker}/bars"
-
-    params = {
-        "timeframe": "1Day",
-        "start": start_time.isoformat(),
-        "end": end_time.isoformat(),
-        "adjustment": "raw",
-        "feed": "iex",
-        "limit": 100
-    }
-
-    response = requests.get(
-        url,
-        headers=alpaca_headers(),
-        params=params,
-        timeout=30
+    return get_bars(
+        ticker,
+        "1Day",
+        start_time,
+        end_time,
+        100
     )
-
-    response.raise_for_status()
-
-    return response.json().get("bars", [])
 
 
 def parse_bar_time(value):
@@ -199,7 +226,6 @@ def evaluate_eod(row, now):
         return
 
     signal_date = signal_time.date()
-
     same_day = None
 
     for bar in bars:
@@ -212,7 +238,7 @@ def evaluate_eod(row, now):
     if same_day is None:
         return
 
-    # Do not save today's close until the daily bar is complete.
+    # Do not save today's daily close before the day is complete.
     if now.date() <= signal_date:
         return
 
@@ -250,8 +276,10 @@ def evaluate_day2(row, now):
         now + timedelta(days=1)
     )
 
-    signal_date = signal_time.date()
+    if not bars:
+        return
 
+    signal_date = signal_time.date()
     future_bars = []
 
     for bar in bars:
@@ -260,6 +288,7 @@ def evaluate_day2(row, now):
         if bar_time.date() > signal_date:
             future_bars.append(bar)
 
+    # Need two trading days after the signal day.
     if len(future_bars) < 2:
         return
 
@@ -300,6 +329,7 @@ def main():
         """).fetchall()
 
     checked = 0
+    errors = 0
 
     for row in rows:
         try:
@@ -310,6 +340,8 @@ def main():
             checked += 1
 
         except Exception as e:
+            errors += 1
+
             print(
                 f"ERROR | ID={row['id']} | "
                 f"{row['ticker']} | {e}"
@@ -317,7 +349,8 @@ def main():
 
     print(
         f"Evaluation finished | "
-        f"signals checked: {checked}"
+        f"signals checked: {checked} | "
+        f"errors: {errors}"
     )
 
 
