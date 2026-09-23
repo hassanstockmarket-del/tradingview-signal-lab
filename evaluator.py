@@ -116,18 +116,28 @@ def get_bars(ticker, timeframe, start_time, end_time, limit):
         timeout=30
     )
 
-    # Some old signals are not US stocks supported by
-    # Alpaca's stock-bars endpoint.
+    # Skip symbols not supported by Alpaca stock data
     if response.status_code == 400:
-        print(f"SKIP | {ticker} | Alpaca does not accept this symbol")
+        print(
+            f"SKIP | {ticker} | "
+            f"Alpaca does not accept this symbol"
+        )
+        return []
+
+    # If Alpaca rate limit is reached,
+    # skip this request and retry on the next cron run.
+    if response.status_code == 429:
+        print(
+            f"RATE LIMIT | {ticker} | "
+            f"Will retry next run"
+        )
         return []
 
     response.raise_for_status()
 
     data = response.json()
 
-    # Alpaca can return "bars": null.
-    # Always return a list to the evaluator.
+    # Alpaca can return "bars": null
     return data.get("bars") or []
 
 
@@ -238,7 +248,8 @@ def evaluate_eod(row, now):
     if same_day is None:
         return
 
-    # Do not save today's daily close before the day is complete.
+    # Do not save today's daily close
+    # before the day is complete.
     if now.date() <= signal_date:
         return
 
@@ -288,7 +299,7 @@ def evaluate_day2(row, now):
         if bar_time.date() > signal_date:
             future_bars.append(bar)
 
-    # Need two trading days after the signal day.
+    # Need two trading days after signal day
     if len(future_bars) < 2:
         return
 
@@ -312,6 +323,107 @@ def evaluate_day2(row, now):
             result,
             row["id"]
         ))
+
+
+def print_signal_results():
+    try:
+        with get_conn() as conn:
+            rows = conn.execute("""
+                SELECT
+                    signal_type,
+                    COUNT(*) AS total,
+
+                    COUNT(hour1_return) AS hour1_count,
+
+                    ROUND(
+                        100.0 *
+                        COUNT(*) FILTER (
+                            WHERE hour1_return > 0
+                        )
+                        / NULLIF(
+                            COUNT(hour1_return),
+                            0
+                        ),
+                        1
+                    ) AS hour1_win_rate,
+
+                    ROUND(
+                        AVG(hour1_return)::numeric,
+                        3
+                    ) AS hour1_avg,
+
+                    COUNT(eod_return) AS eod_count,
+
+                    ROUND(
+                        100.0 *
+                        COUNT(*) FILTER (
+                            WHERE eod_return > 0
+                        )
+                        / NULLIF(
+                            COUNT(eod_return),
+                            0
+                        ),
+                        1
+                    ) AS eod_win_rate,
+
+                    ROUND(
+                        AVG(eod_return)::numeric,
+                        3
+                    ) AS eod_avg,
+
+                    COUNT(day2_return) AS day2_count,
+
+                    ROUND(
+                        100.0 *
+                        COUNT(*) FILTER (
+                            WHERE day2_return > 0
+                        )
+                        / NULLIF(
+                            COUNT(day2_return),
+                            0
+                        ),
+                        1
+                    ) AS day2_win_rate,
+
+                    ROUND(
+                        AVG(day2_return)::numeric,
+                        3
+                    ) AS day2_avg
+
+                FROM signals
+
+                GROUP BY signal_type
+
+                ORDER BY
+                    hour1_win_rate DESC NULLS LAST
+            """).fetchall()
+
+        print("")
+        print("=" * 90)
+        print("SIGNAL RESULTS")
+        print("=" * 90)
+
+        for row in rows:
+            print(
+                f"SIGNAL: {row['signal_type']} | "
+                f"TOTAL: {row['total']} | "
+                f"1H: n={row['hour1_count']} "
+                f"WIN={row['hour1_win_rate']}% "
+                f"AVG={row['hour1_avg']}% | "
+                f"EOD: n={row['eod_count']} "
+                f"WIN={row['eod_win_rate']}% "
+                f"AVG={row['eod_avg']}% | "
+                f"DAY2: n={row['day2_count']} "
+                f"WIN={row['day2_win_rate']}% "
+                f"AVG={row['day2_avg']}%"
+            )
+
+        print("=" * 90)
+
+    except Exception as e:
+        print(
+            f"RESULT REPORT ERROR | {e}"
+        )
 
 
 def main():
@@ -352,6 +464,9 @@ def main():
         f"signals checked: {checked} | "
         f"errors: {errors}"
     )
+
+    # Print statistical results after evaluation
+    print_signal_results()
 
 
 if __name__ == "__main__":
