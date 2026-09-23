@@ -97,3 +97,4 @@ def print_signal_results():
         print(
             f"RESULT REPORT ERROR | {e}"
         )
+        print_signal_results()
